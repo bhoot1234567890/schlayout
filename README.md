@@ -1,197 +1,216 @@
 # schlayout
 
-> *"Any sufficiently advanced schematic placer is indistinguishable from a tired graduate student."*
+![Python](https://img.shields.io/badge/python-3.10%2B-blue)
+![KiCad](https://img.shields.io/badge/KiCad-7%2B%20symbols%20required-blue)
+![Status](https://img.shields.io/badge/status-experimental-orange)
 
-A Python library that tries to do what every electrical engineer can do in their sleep: place components on a schematic so they don't look like garbage.
+> *“Any sufficiently advanced schematic placer is indistinguishable from a tired graduate student.”*
 
-**It mostly fails. But it fails *scientifically*.**
+A schematic auto-placement engine that tries to lay out KiCad components like a human would — and **mostly fails, but fails scientifically**. Built for anyone who has watched KiCad import a netlist and scatter 47 parts across twelve pages like a toddler with LEGOs.
 
----
-
-## Why This Exists
-
-You know that moment when KiCad imports a netlist and scatters 47 components across 12 pages like a toddler with LEGOs? And you spend the next hour dragging resistors around going "no, *you* go *there*, and *you* go next to the capacitor, and WHY IS THE GROUND SYMBOL AT THE TOP OF THE PAGE?"
-
-We tried to automate that. Here's what we learned.
-
-### The Psychology
-
-Humans read schematics in three phases:
-
-| Phase | Time | What happens |
-|-------|------|-------------|
-| **Preattentive Gestalt** | 100ms | *"Power at top, ground at bottom — this circuit is normal"* |
-| **Template Matching** | 500ms-2s | *"Two resistors in series? That's a voltage divider."* |
-| **Narrative Construction** | 2-10s | *"Signal enters here, gets divided, exits there."* |
-
-If you violate phase 1 (ground pointing sideways, power at the bottom), the reader's brain rejects the schematic before they even consciously look at it. This is not a preference — this is how the visual cortex works.
-
-Computers don't have a visual cortex. They have cost functions. And cost functions don't know that "ground points down" is infinitely more important than "wire length is minimal."
+`schlayout` parses real KiCad symbol libraries, searches rotations × grid positions for the minimum-tangle placement, and emits valid `.kicad_sch` files. The honest pitch: ERC passing ≠ a readable schematic, and a cost function does not know that “ground points down” matters infinitely more than “wire length is minimal.” This project is the artefact of finding that out the hard way.
 
 ---
 
-## The 11 Principles of Schematic Readability
+## ✨ Features
 
-Derived from cognitive research, transit map design, chemical structure layout, and staring at too many bad schematics:
-
-| # | Principle | Weight | What happens if you violate it |
-|---|-----------|--------|-------------------------------|
-| 1 | **Ground Points Down** | ∞ | Reader's brain rejects the schematic in 100ms |
-| 2 | **Voltage Falls Down** | ∞ | Reader must consciously invert their mental model |
-| 3 | **Signal Flows Left→Right** | critical | Fights reading direction; slower tracing |
-| 4 | **Functional Proximity** | strong | Related components scattered → can't group |
-| 5 | **Collinear Series Paths** | strong | Visual scanning breaks; requires pathfinding |
-| 6 | **Wire Orthogonality** | strong | Diagonals look sloppy; harder to trace |
-| 7 | **Junction Dot Clarity** | required | "Wait, is that connected or not?" |
-| 8 | **Wire Minimalism** | moderate | Extra bends are cognitive speed bumps |
-| 9 | **Label Proximity** | moderate | "Which component does VOUT belong to?" |
-| 10 | **Symmetry** | weak | Visual noise masks circuit structure |
-| 11 | **Whitespace** | weak | Crowding causes confusion |
-
-The key insight: **these are HIERARCHICAL, not additive.** Principle 1 is worth more than principles 8-11 combined. A longer wire preserving voltage gradient beats a shorter wire inverting it. Optimization algorithms fundamentally don't understand this.
+- **Real KiCad symbol data.** Parses `.kicad_sym` system libraries (`Device`, `power`, …) to extract true pin positions, bounding boxes, and raw S-expression fragments — placements use actual geometry, not toy boxes.
+- **Brute-force optimal placement** for small circuits (≤ ~4 components): exhaustive search over rotations × grid cells, guaranteed global optimum on the given grid.
+- **Force-directed + simulated-annealing placer** for larger circuits (2–200 components), with multi-start rotation search and overlap/HPWL cost.
+- **Loop checker** — the one genuinely useful module: detects wire–wire crossings, wires passing through component bodies, and reports total wire length and a cleanliness verdict.
+- **Valid `.kicad_sch` output.** Embeds `lib_symbols`, places components with UUIDs, routes pin-to-pin wires, drops junctions, and adds net labels. Balanced S-expression output that KiCad 7/8 will open.
+- **Grid-accurate.** Everything snaps to KiCad’s 2.54 mm (100 mil) grid on an A4 (297 × 210 mm) sheet.
+- **A documented cognitive model** (`docs/cognitive_model.md`) — the 11 hierarchical readability principles and three-phase human reading model that explain *why* the placers fail.
 
 ---
 
-## How We Tried to Solve It
+## 📦 Installation
 
-### Attempt 1: Brute Force
-Search every position and rotation. 64 million configurations for 3 components. Works great for ≤4 components, then the universe ends.
+**Prerequisites**
 
-### Attempt 2: Force-Directed Physics
-Attractive forces along nets, repulsive between overlaps. Components flew to page edges like scared insects. Added centering force. They huddled in the corner instead.
+- **Python 3.10+** (the codebase uses `X | None` union syntax).
+- **KiCad 7+** with its symbol libraries installed. `schlayout` reads from the default system paths:
+  - macOS: `/Applications/KiCad/KiCad.app/Contents/SharedSupport/symbols`
+  - Linux: `/usr/share/kicad/symbols`
+  - Either OS: `~/Library/Application Support/kicad`
 
-### Attempt 3: ELK / Sugiyama Layered Layout
-The same algorithm that draws Mermaid diagrams. Spent a week researching. ELK explicitly mentions "circuit schematics" as a design target. Pin positions are first-class. It's the right tool. It requires a JVM or JS bridge. We sighed and moved on.
+  Windows is not auto-detected; pass `lib_dirs=[...]` to `SymbolLibrary(...)` if your libraries live elsewhere.
 
-### Attempt 4: Simulated Annealing
-Random swaps with temperature-based acceptance. The gold standard in VLSI placement. Works great for 10,000 standard cells. For a 3-component LED circuit, it produced layouts that looked like modern art.
-
-### Attempt 5: Minimum Spanning Tree Routing
-Connected closest pins first. Created elegant minimum-wire-length paths. Also created wires that passed directly through the middle of other components. The MST does not respect personal space.
-
-### Attempt 6: Diagonal Routing
-"Just draw straight lines between pins." The user suggested this. It worked surprisingly well. Then two wires crossed and KiCad said they were shorted. They weren't. KiCad was just being KiCad.
-
-### Attempt 7: Cycle Breaking
-Learned from graph theory: loops are cycles. Break cycles by removing low-weight edges. Identify power/ground return paths as low-weight. Convert cyclic netlist to tree. Place tree cleanly. This actually worked. The voltage divider became readable. Then we rotated the resistors 180° and everything got 38% shorter.
-
-### Attempt 8: The Cognitive Model
-Spawned independent agents to research how metro maps, chemical structures, transit diagrams, and human engineers handle layout. The answer across all domains: **cycles are the foundation, not the problem.** Place the structure first, grow everything else from it. Templates for known patterns. Polish with local optimization.
-
----
-
-## What Actually Works
-
-After all that, here's the pipeline that produces readable schematics:
-
-```python
-from schlayout import SymbolLibrary, BruteForcePlacer, NetDef, SchematicGenerator
-
-# 1. Load real KiCad symbols
-lib = SymbolLibrary()
-bat = lib.load("Device", "Battery_Cell")
-res = lib.load("Device", "R")
-
-# 2. Search for optimal placement
-placer = BruteForcePlacer(components, nets)
-placed, score = placer.search()
-
-# 3. Generate valid .kicad_sch
-gen = SchematicGenerator("My Circuit")
-gen.generate(placed, nets, "output.kicad_sch", symbol_lib=lib)
-```
-
-**For 3-4 components:** brute force over positions + rotations with loop-checker verification. Finds the global optimum.
-
-**For larger circuits:** cognitive placer (voltage gradient + series chain detection + orthogonal routing) plus local optimization.
-
-**The loop checker** (`loop_checker.py`): verifies no wire crossings, no wires through components, computes wire length, and tells you if the layout is clean.
-
----
-
-## Installation
+There is no packaging metadata in this repository (no `pyproject.toml` / `setup.py`), so install is source-only:
 
 ```bash
-git clone https://github.com/nuclearkerosene/schlayout
+git clone https://github.com/bhoot1234567890/schlayout.git
 cd schlayout
-pip install -e .
 ```
 
-Requires KiCad 7+ for symbol library access.
+Then either put `src/` on your path manually or run scripts the way the bundled examples do:
+
+```python
+import sys
+sys.path.insert(0, "src")
+```
 
 ---
 
-## The Loop Checker
+## 🚀 Usage
 
-The one genuinely useful module. Feed it a placement and it tells you if the wires tangle:
+A complete, runnable example (mirrors `examples/led_optimal.py`): battery → current-limiting resistor → LED.
+
+```python
+import sys
+sys.path.insert(0, "src")
+
+from schlayout import SymbolLibrary, BruteForcePlacer, NetDef, SchematicGenerator
+from schlayout.placer import snap
+
+# 1. Load real symbols from the KiCad system library
+lib = SymbolLibrary()
+bat = lib.load("Device", "Battery_Cell"); bat.value = "3V"
+res = lib.load("Device", "R");             res.value = "220Ω"
+led = lib.load("Device", "LED");           led.value = "LED"
+
+# 2. Describe components and nets
+components = [("BAT1", bat), ("R1", res), ("D1", led)]
+nets = [
+    NetDef("VCC",    [("BAT1", "1"), ("R1", "1")]),
+    NetDef("LED_IN", [("R1", "2"),   ("D1", "2")]),
+    NetDef("RTN",    [("D1", "1"),   ("BAT1", "2")]),
+]
+
+# 3. Brute-force the lowest-cost placement on a small grid
+placer = BruteForcePlacer(
+    components, nets,
+    x_range=[snap(x) for x in range(12, 40, 3)],
+    y_range=[snap(y) for y in range(30, 60, 4)],
+)
+placed, score = placer.search()
+
+# 4. Emit a .kicad_sch file
+SchematicGenerator(title="LED Circuit").generate(
+    placed, nets, "/tmp/led_circuit.kicad_sch", symbol_lib=lib
+)
+print(f"score={score:.1f}  written /tmp/led_circuit.kicad_sch")
+```
+
+Expected output (proportions vary with your KiCad symbol versions):
+
+```text
+BAT 7.62×7.62mm  R 5.08×5.08mm  LED 5.08×5.08mm
+score=43.5  written /tmp/led_circuit.kicad_sch
+```
+
+Open `/tmp/led_circuit.kicad_sch` in KiCad. For larger circuits, swap `BruteForcePlacer` for `ForceDirectedPlacer` (see Configuration) — that is what `tests/test_circuits.py` uses to lay out op-amp buffers, 555 timers, bridge rectifiers, and H-bridges.
+
+---
+
+## ⚙️ Configuration
+
+### `BruteForcePlacer`
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `x_range`, `y_range` | auto (grid-fitted to the page) | Candidate X/Y positions to search, in mm. Smaller = faster. |
+| `rotations` | `[0, 90, 180, 270]` | Rotations tried per component. |
+| `bend_penalty` | `10.0` | Cost added per non-axial wire segment. |
+| `page_width` / `page_height` | `297.0` / `210.0` | A4 sheet in mm. |
+| `page_margin` | `5.0` | Keep components this far from the page edge. |
+
+Cost = sum of Manhattan wire lengths + bend penalties + a 30-point collision penalty when distinct nets share a Y. Search space is `|xs|ⁿ × |ys|ⁿ × |rots|ⁿ`, so keep the grid small for n > 4.
+
+### `ForceDirectedPlacer`
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `T_initial` / `T_min` / `alpha` | `200.0` / `0.05` / `0.93` | Simulated-annealing temperature schedule. |
+| `moves_per_temp` | `40` | Moves evaluated at each temperature step. |
+| `max_steps` | `150` | Annealing iterations. |
+| `attraction` / `repulsion` | `1.0` / `80.0` | Net attraction vs. overlap repulsion forces. |
+| `centering` | `0.02` | Weak pull toward the page centre (stops “insects fleeing to the edges”). |
+| `rotation_restarts` | `True` | For n ≤ 4, tries every rotation combination. |
+| `position_restarts` | `3` | Independent position initialisations; best score wins. |
+| `allowed_rotations` | `[0, 90, 180, 270]` | Rotations considered. |
+| `random_seed` | `42` | Set for reproducibility. |
+
+---
+
+## 🧱 Architecture
+
+The package grew through eight failed placement strategies (documented in `docs/cognitive_model.md`). It now contains **two parallel pipelines**:
+
+```mermaid
+flowchart LR
+    subgraph Public["Public API (src/schlayout/__init__.py)"]
+        A[SymbolLibrary<br/>parse .kicad_sym] --> B{Size?}
+        B -- "≤ ~4 parts" --> C[BruteForcePlacer<br/>exhaustive optimum]
+        B -- "2–200 parts" --> D[ForceDirectedPlacer<br/>SA + multi-start]
+        C --> E[SchematicGenerator<br/>.kicad_sch writer]
+        D --> E
+    end
+    subgraph Internal["Experimental layered pipeline (not exported)"]
+        F[Netlist<br/>abstract graph] --> G[SugiyamaPlacer<br/>layered layout]
+        G --> H[ManhattanRouter<br/>orthogonal routing]
+        H --> I[KiCadWriter<br/>.kicad_sch writer]
+    end
+    E -. validated by .-> J[loop_checker]
+    I -. validated by .-> J
+```
+
+**Public stack** (exported from `schlayout`): real symbol data in, `.kicad_sch` out. This is the path used by `examples/led_optimal.py` and `tests/test_circuits.py`.
+
+**Experimental layered stack** (`netlist.py` → `layout.py` → `routing.py` → `kicad_writer.py`): a Sugiyama/ELK-inspired layered placer built on an abstract `Netlist` graph. It is importable from the submodules directly but is **not re-exported** by `__init__.py`, so treat it as a work in progress.
+
+### Module map
+
+| Module | Role |
+|--------|------|
+| `symbols.py` | KiCad `.kicad_sym` parser → `SymbolLibrary`, `SymbolData`, `SymbolPin`. |
+| `placer.py` | Exhaustive `BruteForcePlacer` over rotations × grid. |
+| `force_placer.py` | `ForceDirectedPlacer`: force-directed + SA + multi-start. |
+| `cognitive_placer.py` | Placer built on the 11 readability principles (voltage gradient, series-chain detection). |
+| `cycle_placer.py` | Graph-theory cycle-breaker → tree layout. |
+| `loop_checker.py` | Wire-crossing / wire-through-component detection; wire-length metrics. |
+| `generator.py` | `.kicad_sch` writer for the public placer stack. |
+| `netlist.py` | Abstract circuit graph (`Netlist`, `Component`, `Pin`, `SymbolDef`). |
+| `layout.py` | `SugiyamaPlacer` — layered placement for the netlist stack. |
+| `routing.py` | `ManhattanRouter` — orthogonal spanning-tree routing with junctions. |
+| `kicad_writer.py` | `.kicad_sch` writer for the netlist stack. |
+
+---
+
+## 🔍 The loop checker
+
+Feed it a placement’s wires and component boxes and it tells you whether the layout tangles:
 
 ```python
 from schlayout.loop_checker import check_loop
 
 result = check_loop(wires, component_bboxes, pin_positions)
-print(result['is_clean'])      # True if no crossings
-print(result['total_length'])  # Total wire length
-print(result['crossings'])     # List of crossing wire pairs
+print(result["is_clean"])          # True if no crossings, no penetrations
+print(result["total_length"])      # total wire length (mm)
+print(result["crossings"])         # [(wire_idx, wire_idx), ...]
+print(result["component_crossings"])  # [(wire_idx, comp_idx), ...]
 ```
 
----
-
-## Project Structure
-
-```
-schlayout/
-├── symbols.py          # KiCad .kicad_sym parser
-├── placer.py           # Brute-force search over positions + rotations
-├── force_placer.py     # Force-directed with SA acceptance
-├── cognitive_placer.py # Voltage gradient + series chain detection
-├── cycle_placer.py     # Cycle breaker + tree layout
-├── loop_checker.py     # Wire crossing detection + length optimization
-├── generator.py        # .kicad_sch file writer
-└── routing.py          # Manhattan + MST routing
-```
+Also exports `wire_length`, `hpwl` (half-perimeter wire length), `segments_intersect`, and `minimal_wire_length_possible` for cost-function experiments.
 
 ---
 
-## The 10 Test Circuits
+## 📚 Test circuit catalog
 
-| # | Circuit | Components | Topology |
-|---|---------|-----------|----------|
-| 1 | LED + Resistor | 3 | Loop |
-| 2 | Voltage Divider | 4 | Loop with GND break |
-| 3 | RC Low-Pass Filter | 4 | Tree |
-| 4 | R-2R Ladder | 6 | Ladder |
-| 5 | LC Tank | 4 | Parallel |
-| 6 | Diode Clamp | 5 | Bridge |
-| 7 | Dual LED | 6 | Star |
-| 8 | Pi Filter | 6 | Ladder |
-| 9 | Wheatstone Bridge | 6 | Bridge loop |
-| 10 | Buck Converter | 7 | Mesh |
+`docs/circuits.md` defines ten canonical circuits drawn entirely from KiCad’s `Device` and `power` libraries, ranging from a 3-part LED loop up to a 7-component buck converter (R-2R ladder, LC tank, Wheatstone bridge, pi filter, …). `tests/test_circuits.py` exercises a second set of ten (pull-up, BJT switch, op-amp buffer, 555 astable, full-bridge rectifier, 7805 regulator, transistor H-bridge) through `ForceDirectedPlacer`.
 
 ---
 
-## What We Learned
+## 🤝 Contributing
 
-1. **ERC passing ≠ good schematic.** Zero violations does not mean readable.
-2. **Rotation is placement.** A 180° flip can reduce wire length by 38%.
-3. **Diagonals are fine.** Orthogonality is a preference, not a law.
-4. **Labels are the hardest problem.** Every single approach failed at label placement.
-5. **Ground is a cycle-breaker.** Human schematics don't draw return wires — they use GND symbols.
-6. **The cognitive model is hierarchical.** You can't optimize readability with additive cost functions.
-7. **KiCad's file format has tabs.** This matters more than you'd think.
-8. **`pin_world_position` needs Y-inversion.** We learned this the hard way. Multiple times.
+There is no `CONTRIBUTING.md`. If you understand why `self.y - py` is correct in `PlacedComponent.pin_world` (KiCad’s Y-axis points up, screen Y points down), you are already qualified. Read `docs/cognitive_model.md` first — it explains the hierarchical cost model that any new placer should respect.
 
 ---
 
-## Contributing
+## 📄 License
 
-If you understand why `self.y - py` is correct in `pin_world_position`, you're already qualified. If you don't, read the commit history and weep with us.
-
----
-
-## License
-
-MIT. Use it, break it, fix it, laugh at it.
+**No `LICENSE` file is present in this repository.** Without one, default copyright applies and no usage, modification, or distribution rights are granted. Add a `LICENSE` file (e.g. MIT, Apache-2.0) to declare terms before relying on this code.
 
 ---
 
-*"The difference between a good schematic and a bad one is about 12 pixels and three hours of your life."*
+*“The difference between a good schematic and a bad one is about 12 pixels and three hours of your life.”*
